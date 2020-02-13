@@ -24,6 +24,10 @@
 package com.microsoft.identity.client;
 
 import android.content.Context;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
+import android.content.pm.Signature;
+import android.util.Base64;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
@@ -44,6 +48,10 @@ import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.UnsupportedEncodingException;
+import java.net.URLEncoder;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 
 import static com.microsoft.identity.client.internal.MsalUtils.validateNonNullArgument;
 
@@ -73,7 +81,7 @@ public class PublicClientApplicationConfigurationFactory {
     public static PublicClientApplicationConfiguration initializeConfiguration(@NonNull final Context context,
                                                                                @NonNull final File configFile) {
         validateNonNullArgument(configFile, "configFile");
-        return initializeConfigurationInternal(context, loadConfiguration(configFile));
+        return initializeConfigurationInternal(context, loadConfiguration(context, configFile));
     }
 
     private static PublicClientApplicationConfiguration initializeConfigurationInternal(@NonNull final Context context,
@@ -107,19 +115,37 @@ public class PublicClientApplicationConfigurationFactory {
                                                                   final int configResourceId) {
         final InputStream configStream = context.getResources().openRawResource(configResourceId);
         boolean useDefaultConfigResourceId = configResourceId == R.raw.msal_default_config;
-        return loadConfiguration(configStream, useDefaultConfigResourceId);
+        return loadConfiguration(context, configStream, useDefaultConfigResourceId);
     }
 
     @VisibleForTesting
-    static PublicClientApplicationConfiguration loadConfiguration(@NonNull final File configFile) {
+    static PublicClientApplicationConfiguration loadConfiguration(@NonNull Context context, @NonNull final File configFile) {
         try {
-            return loadConfiguration(new FileInputStream(configFile), false);
+            return loadConfiguration(context, new FileInputStream(configFile), false);
         } catch (FileNotFoundException e) {
             throw new IllegalArgumentException("Provided configuration file path=" + configFile.getPath() + " not found.");
         }
     }
 
-    private static PublicClientApplicationConfiguration loadConfiguration(final @NonNull InputStream configStream,
+    private static String getSignatureHash(Context context) {
+        try {
+            PackageInfo packageInfo = context.getPackageManager().getPackageInfo(context.getPackageName(), PackageManager.GET_SIGNATURES);
+            String packageSigningSha;
+            Signature signature = packageInfo.signatures[0];
+            MessageDigest digest;
+            digest = MessageDigest.getInstance("SHA");
+            digest.update(signature.toByteArray());
+            packageSigningSha = Base64.encodeToString(digest.digest(), Base64.NO_WRAP);
+            return packageSigningSha;
+        } catch (NoSuchAlgorithmException e) {
+            e.printStackTrace();
+        } catch (PackageManager.NameNotFoundException e) {
+            e.printStackTrace();
+        }
+        return "";
+    }
+
+    private static PublicClientApplicationConfiguration loadConfiguration(final @NonNull Context context, final @NonNull InputStream configStream,
                                                                           final boolean isDefaultConfiguration) {
         byte[] buffer;
 
@@ -153,7 +179,19 @@ public class PublicClientApplicationConfigurationFactory {
         final String config = new String(buffer);
         final Gson gson = getGsonForLoadingConfiguration();
 
-        return gson.fromJson(config, PublicClientApplicationConfiguration.class);
+        PublicClientApplicationConfiguration publicClientApplicationConfiguration = gson.fromJson(config, PublicClientApplicationConfiguration.class);
+        final String signatureHash = getSignatureHash(context);
+        try {
+            final String redirectUrl = generateRedirectUrl(context.getPackageName(), signatureHash);
+            publicClientApplicationConfiguration.setRedirectUri(redirectUrl);
+        } catch (UnsupportedEncodingException e) {
+            e.printStackTrace();
+        }
+        return publicClientApplicationConfiguration;
+    }
+
+    private static String generateRedirectUrl(String packageName, String signatureHash) throws UnsupportedEncodingException {
+        return URLEncoder.encode("msauth://" + packageName + "/" + signatureHash, "UTF-8");
     }
 
     private static Gson getGsonForLoadingConfiguration() {
